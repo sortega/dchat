@@ -4,7 +4,7 @@ import java.io.PrintWriter
 import scala.annotation.tailrec
 
 import jline.console.ConsoleReader
-import net.tomp2p.futures.{BaseFutureListener, FutureResponse}
+import net.tomp2p.futures.{FutureDHT, BaseFutureListener, FutureResponse}
 import net.tomp2p.p2p.Peer
 import net.tomp2p.peers.{Number160, PeerAddress, PeerMapChangeListener}
 import net.tomp2p.rpc.ObjectDataReply
@@ -48,16 +48,18 @@ class Chat(peer: Peer) {
     }
   }
 
+  private val SendDirectPattern = "send-direct (\\S+) (.*)".r
   private val SendPattern = "send (\\S+) (.*)".r
   private val EmptyPattern = "\\s*".r
 
   private def processCommand(line: String): Unit = line match {
+    case SendDirectPattern(to, message) => sendDirectMessage(to, message)
     case SendPattern(to, message) => sendMessage(to, message)
     case EmptyPattern() => // Do nothing
     case unknown => output.println(s"Don't understand '$unknown'")
   }
 
-  private def sendMessage(to: String, message: String): Unit = {
+  private def sendDirectMessage(to: String, message: String): Unit = {
     val futureResult = peer.get(new Number160(to)).start()
     futureResult.awaitUninterruptibly()
     if (futureResult.getData == null) {
@@ -70,6 +72,21 @@ class Chat(peer: Peer) {
       .start()
     s.addListener(new BaseFutureListener[FutureResponse] {
       override def operationComplete(f: FutureResponse): Unit = {
+        output.println("(sent)")
+      }
+      override def exceptionCaught(throwable: Throwable): Unit = {
+        output.println(s"(cannot send: $throwable)")
+      }
+    })
+  }
+
+  private def sendMessage(to: String, message: String): Unit = {
+    val toId: Number160 = new Number160(to)
+    val s = peer.send(toId)
+      .setObject(message.getBytes)
+      .start()
+    s.addListener(new BaseFutureListener[FutureDHT] {
+      override def operationComplete(f: FutureDHT): Unit = {
         output.println("(sent)")
       }
       override def exceptionCaught(throwable: Throwable): Unit = {
