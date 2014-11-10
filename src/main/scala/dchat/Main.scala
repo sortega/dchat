@@ -30,7 +30,6 @@ object Main {
 
   private def startNetwork(): Peer = {
     val peer = new PeerMaker(new Number160(Random.nextLong()))
-      .setBindings(new Bindings("en0"))
       .setPorts(Port)
       .makeAndListen()
     peer.bootstrap()
@@ -42,7 +41,6 @@ object Main {
 
   private def joinNetwork(hostnames: Seq[String]): Peer = {
     val peer = new PeerMaker(new Number160(Random.nextLong()))
-      .setBindings(new Bindings("en0"))
       .setPorts(2000 + Random.nextInt(3000))
       .makeAndListen()
     peer.getConfiguration.setBehindFirewall(true)
