@@ -5,92 +5,106 @@ import scala.collection.JavaConverters._
 import scala.util.Random
 
 import net.tomp2p.connection.Bindings
-import net.tomp2p.futures.FutureDHT
-import net.tomp2p.p2p.{Peer, PeerMaker}
+import net.tomp2p.dht.{PeerBuilderDHT, PeerDHT}
+import net.tomp2p.nat.PeerBuilderNAT
+import net.tomp2p.p2p.PeerBuilder
 import net.tomp2p.peers.Number160
 import net.tomp2p.storage.Data
 
 object Main {
-  val Port = 2222
+  val Port = 2223
 
   def main(args: Array[String]): Unit = {
-    val peer = args match {
+    val dht = args match {
       case Array("serve", hostname) => startNetwork(hostname)
       case Array("upnp", masterHostname) => joinNetworkWithUpnp(masterHostname)
       case Array("fw", externalAddress, forwardedPort, masterAddress) =>
         joinNetworkWithPortForwarding(externalAddress, forwardedPort.toInt, masterAddress)
+      case _ =>
+        println("Usage: java -jar <this jar> (serve <hostname> | upnp <master_hostname> | " +
+          "fw <external_ip> <port> <master_hostname> )")
+        System.exit(-1)
+        return
     }
     try {
-      new Chat(peer).run()
+      new Chat(dht).run()
     } finally {
-      peer.shutdown()
+      dht.shutdown()
     }
   }
 
-  private def publishAddress(peer: Peer): Unit = {
-    val publication = peer.put(peer.getPeerID)
-      .setData(new Data(peer.getPeerAddress.toByteArray))
+  private def publishAddress(peer: PeerDHT): Unit = {
+    val publication = peer.put(peer.peerID)
+      .data(new Data(peer.peer().peerAddress.toByteArray))
       .start()
     publication.awaitUninterruptibly()
     require(publication.isSuccess)
   }
 
-  private def unpublishAddress(peer: Peer): FutureDHT = {
-    peer.remove(peer.getPeerID).start().awaitUninterruptibly()
+  private def unpublishAddress(peer: PeerDHT): Unit = {
+    peer.remove(peer.peer().peerID).start().awaitUninterruptibly()
   }
 
-  private def startNetwork(hostname: String): Peer = {
-    val peer = new PeerMaker(new Number160(Random.nextLong()))
-      .setBindings(new Bindings(InetAddress.getByName(hostname), Port, Port))
-      .setPorts(Port)
-      .makeAndListen()
+  private def startNetwork(hostname: String): PeerDHT = {
+    val peer = new PeerBuilder(new Number160(Random.nextLong()))
+      //.bindings(new Bindings().addAddress(InetAddress.getByName(hostname)))
+      .ports(Port)
+      .start()
     peer.bootstrap()
-      .setBootstrapTo(Seq(peer.getPeerAddress).asJava)
+      .bootstrapTo(Seq(peer.peerAddress()).asJava)
       .start()
       .awaitUninterruptibly()
-    peer
+    new PeerBuilderDHT(peer).start()
   }
 
-  private def joinNetworkWithUpnp(masterHostname: String): Peer = {
-    val peer = new PeerMaker(new Number160(Random.nextLong()))
-      .setPorts(5000 + Random.nextInt(1000))
-      .makeAndListen()
-    peer.getConfiguration.setBehindFirewall(true)
-    val discover = peer.discover()
-      .setInetAddress(InetAddress.getByName(masterHostname))
-      .setPorts(Port)
+  private def joinNetworkWithUpnp(masterHostname: String): PeerDHT = {
+    val peer = new PeerBuilder(new Number160(Random.nextLong()))
+      .ports(5000 + Random.nextInt(1000))
+      .behindFirewall(true)
       .start()
+    val dht = new PeerBuilderDHT(peer).start()
+    val discover = dht.peer().discover()
+      .inetAddress(InetAddress.getByName(masterHostname))
+      .ports(Port)
+      .start()
+    val nat = new PeerBuilderNAT(peer).start()
+    val forwarding = nat.startSetupPortforwarding(discover)
     discover.awaitUninterruptibly()
-    require(discover.isSuccess)
-    val bootstrap = peer.bootstrap()
-      .setPeerAddress(discover.getReporter)
+    forwarding.awaitUninterruptibly()
+    require(forwarding.isSuccess, "FORWARDING FAILURE: " + forwarding.failedReason())
+
+    val bootstrap = dht.peer().bootstrap()
+      .peerAddress(forwarding.reporter)
       .start()
     bootstrap.awaitUninterruptibly()
+    require(bootstrap.isSuccess, "BOOTSTRAP FAILURE: " + bootstrap.failedReason())
+
     println("Bootstrapped to %s (%d peers)".format(
-      bootstrap.getBootstrapTo.asScala.mkString(", "), peer.getPeerBean.getPeerMap.getAll.size()))
-    println("Peers: " + peer.getPeerBean.getPeerMap.getAll.asScala.mkString(", "))
-    val address: InetAddress = peer.getPeerBean.getServerPeerAddress.getInetAddress
+      bootstrap.bootstrapTo.asScala.mkString(", "), dht.peerBean.peerMap.all.size()))
+    println("Peers: " + dht.peerBean.peerMap.all.asScala.mkString(", "))
+    val address: InetAddress = dht.peerBean.serverPeerAddress.inetAddress
     if (!address.isLoopbackAddress && !address.isSiteLocalAddress) {
-      publishAddress(peer)
+      publishAddress(dht)
     } else {
-      unpublishAddress(peer)
+      unpublishAddress(dht)
     }
-    peer
+    dht
   }
 
   private def joinNetworkWithPortForwarding(
-      externalAddress: String, forwardedPort: Int, masterAddress: String): Peer = {
-    val peer = new PeerMaker(new Number160(Random.nextLong()))
-      .setBindings(new Bindings(InetAddress.getByName(externalAddress), forwardedPort, forwardedPort))
-      .setPorts(forwardedPort)
-      .makeAndListen()
+      externalAddress: String, forwardedPort: Int, masterAddress: String): PeerDHT = {
+    val peer = new PeerBuilder(new Number160(Random.nextLong()))
+      .bindings(new Bindings().addAddress(InetAddress.getByName(externalAddress)))
+      .ports(forwardedPort)
+      .start()
     val bootstrap = peer.bootstrap()
-      .setInetAddress(InetAddress.getByName(masterAddress))
-      .setPorts(Port)
+      .inetAddress(InetAddress.getByName(masterAddress))
+      .ports(Port)
       .start()
     bootstrap.awaitUninterruptibly()
-    publishAddress(peer)
-    println("Bootstrapped to " + bootstrap.getBootstrapTo.asScala.mkString(", "))
-    peer
+    val dht = new PeerBuilderDHT(peer).start()
+    publishAddress(dht)
+    println("Bootstrapped to " + bootstrap.bootstrapTo.asScala.mkString(", "))
+    dht
   }
 }

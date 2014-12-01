@@ -4,38 +4,40 @@ import java.io.PrintWriter
 import scala.annotation.tailrec
 
 import jline.console.ConsoleReader
-import net.tomp2p.futures.{FutureDHT, BaseFutureListener, FutureResponse}
-import net.tomp2p.p2p.Peer
-import net.tomp2p.peers.{Number160, PeerAddress, PeerMapChangeListener}
+import net.tomp2p.dht.{FutureSend, PeerDHT}
+import net.tomp2p.futures.{BaseFutureListener, FutureDirect}
+import net.tomp2p.peers.{Number160, PeerAddress, PeerMapChangeListener, PeerStatatistic}
 import net.tomp2p.rpc.ObjectDataReply
 
-class Chat(peer: Peer) {
+class Chat(dht: PeerDHT) {
   private val console = new ConsoleReader()
-  console.setPrompt(peer.getPeerID + ">> ")
+  console.setPrompt(dht.peerID() + ">> ")
   private val output = new PrintWriter(console.getOutput)
 
   object IncomingDataListener extends ObjectDataReply {
     override def reply(peerAddress: PeerAddress, payload: scala.Any): AnyRef = {
       val message = payload.asInstanceOf[Array[Byte]]
-      output.println(s"<<${peerAddress.getID}: ${new String(message)}")
+      output.println(s"<<${peerAddress.peerId}: ${new String(message)}")
       null
     }
   }
 
   object PeerChangeListener extends PeerMapChangeListener {
-    override def peerInserted(peerAddress: PeerAddress): Unit = {
+    override def peerInserted(peerAddress: PeerAddress, verified: Boolean): Unit = {
       output.println("-- New peer at " + peerAddress)
     }
-    override def peerRemoved(peerAddress: PeerAddress): Unit =  {
+
+    override def peerRemoved(peerAddress: PeerAddress, stats: PeerStatatistic): Unit = {
       output.println("-- Removed peer at " + peerAddress)
     }
-    override def peerUpdated(peerAddress: PeerAddress): Unit = {}
+
+    override def peerUpdated(peerAddress: PeerAddress, stats: PeerStatatistic): Unit = {}
   }
 
   def run(): Unit = {
-    peer.setObjectDataReply(IncomingDataListener)
-    peer.getPeerBean.getPeerMap.addPeerMapChangeListener(PeerChangeListener)
-    output.println("Started as peer " + peer.getPeerID)
+    dht.peer().objectDataReply(IncomingDataListener)
+    dht.peerBean.peerMap.addPeerMapChangeListener(PeerChangeListener)
+    output.println("Started as peer " + dht.peerID())
     loop()
   }
 
@@ -60,19 +62,20 @@ class Chat(peer: Peer) {
   }
 
   private def sendDirectMessage(to: String, message: String): Unit = {
-    val futureResult = peer.get(new Number160(to)).start()
-    futureResult.awaitUninterruptibly()
-    if (futureResult.getData == null) {
+    val futureGet = dht.get(new Number160(to)).start()
+    futureGet.awaitUninterruptibly()
+    if (futureGet.isFailed || futureGet.data == null) {
       output.println(s"(cannot resolve $to address)")
       return
     }
-    val address = new PeerAddress(futureResult.getData.getData)
-    val s = peer.sendDirect(address)
-      .setObject(message.getBytes)
+    val address = new PeerAddress(futureGet.data.toBytes())
+    val s = dht.peer()
+      .sendDirect(address)
+      .`object`(message.getBytes)
       .start()
-    s.addListener(new BaseFutureListener[FutureResponse] {
-      override def operationComplete(f: FutureResponse): Unit = {
-        output.println("(sent)")
+    s.addListener(new BaseFutureListener[FutureDirect] {
+      override def operationComplete(f: FutureDirect): Unit = {
+        output.println(s"(sent to $address)")
       }
       override def exceptionCaught(throwable: Throwable): Unit = {
         output.println(s"(cannot send: $throwable)")
@@ -82,12 +85,12 @@ class Chat(peer: Peer) {
 
   private def sendMessage(to: String, message: String): Unit = {
     val toId: Number160 = new Number160(to)
-    val s = peer.send(toId)
-      .setObject(message.getBytes)
+    val s = dht.send(toId)
+      .`object`(message.getBytes)
       .start()
-    s.addListener(new BaseFutureListener[FutureDHT] {
-      override def operationComplete(f: FutureDHT): Unit = {
-        output.println("(sent)")
+    s.addListener(new BaseFutureListener[FutureSend] {
+      override def operationComplete(f: FutureSend): Unit = {
+        output.println(s"(sent)")
       }
       override def exceptionCaught(throwable: Throwable): Unit = {
         output.println(s"(cannot send: $throwable)")
